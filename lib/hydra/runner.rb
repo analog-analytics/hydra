@@ -19,15 +19,17 @@ module Hydra #:nodoc:
       @io = opts.fetch(:io) { raise "No IO Object" } 
       @verbose = opts.fetch(:verbose) { false }      
       $stdout.sync = true
+      @multi_db = opts.fetch(:multi_db) { nil }
 
-      trace 'Creating test database'
-      ENV['TEST_ENV_NUMBER'] = Process.pid.to_s
-      begin
-        Rake::Task['db:reset'].invoke        
-      rescue Exception => e
-        trace "Error creating test DB: #{e}"
+      if @multi_db
+        @process_id = Process.pid.to_s
+        ENV['TEST_ENV_NUMBER'] = @process_id 
+        begin
+          Rake::Task['db:reset'].invoke        
+        rescue Exception => e
+          trace "Error creating test DB: #{e}"
+        end
       end
-      
 
       trace 'Booted. Sending Request for file'
 
@@ -63,14 +65,14 @@ module Hydra #:nodoc:
 
     # Stop running
     def stop
-      trace "Dropping test database #{ENV['TEST_ENV_NUMBER']}"
-      ENV['TEST_ENV_NUMBER'] = Process.pid.to_s
-      begin
-        Rake::Task['db:drop'].invoke
-      rescue Exception => e
-        trace "Could not drop test database #{ENV['TEST_ENV_NUMBER']}: #{e}"
+      if @multi_db
+        begin
+          Rake::Task['db:drop'].invoke
+        rescue Exception => e
+          trace "Could not drop test database #{ENV['TEST_ENV_NUMBER']}: #{e}"
+        end
       end
-      
+
       @running = false
     end
 
