@@ -20,3 +20,4 @@ pkg
 tags
 
 ## PROJECT::SPECIFIC
+*.gem
