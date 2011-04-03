@@ -17,7 +17,7 @@ module Hydra #:nodoc:
     def initialize(opts = {})
       @verbose = opts.fetch(:verbose) { false }
       @io = opts.fetch(:io) { raise "No IO Object" }
-      @multi_db = opts.fetch(:multi_db) { nil 
+      @multi_db = opts.fetch(:multi_db) { nil }
       @runners = []
       @listeners = []
 
