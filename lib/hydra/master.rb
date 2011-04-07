@@ -68,7 +68,6 @@ module Hydra #:nodoc:
       @autosort = opts.fetch('autosort') { true }
       @sync = opts.fetch('sync') { nil }
       @environment = opts.fetch('environment') { 'test' }
-      @multi_db = opts.fetch('multi_db') { nil } 
 
       if @autosort
         sort_files_from_report
@@ -161,7 +160,7 @@ module Hydra #:nodoc:
       pipe = Hydra::Pipe.new
       child = SafeFork.fork do
         pipe.identify_as_child
-        Hydra::Worker.new(:io => pipe, :runners => runners, :verbose => @verbose, :multi_db => @multi_db)
+        Hydra::Worker.new(:io => pipe, :runners => runners, :verbose => @verbose)
       end
 
       pipe.identify_as_parent
@@ -173,7 +172,7 @@ module Hydra #:nodoc:
 
       runners = worker.fetch('runners') { raise "You must specify the number of runners"  }
       command = worker.fetch('command') {
-        "RAILS_ENV=#{@environment} ruby -e \"require 'rubygems'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new, :runners => #{runners}, :verbose => #{@verbose}, :multi_db => #{@multi_db});\""
+        "RAILS_ENV=#{@environment} ruby -e \"require 'rubygems'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new, :runners => #{runners}, :verbose => #{@verbose});\""
       }
 
       trace "Booting SSH worker"
