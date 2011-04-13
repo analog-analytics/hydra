@@ -22,10 +22,10 @@ module Hydra #:nodoc:
 
       ENV['TEST_ENV_NUMBER'] = Process.pid.to_s 
       begin
-        output = `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:reset`
-        trace "DB:RESET -> #{output}"
-        p "DB:RESET ========"
-        p output
+        # output = `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:reset`
+        # trace "DB:RESET -> #{output}"
+        trace "================="
+        trace `pwd`
       rescue Exception => e
         trace "Error creating test DB: #{e}"
       end
