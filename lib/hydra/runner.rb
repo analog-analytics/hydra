@@ -20,16 +20,14 @@ module Hydra #:nodoc:
       @verbose = opts.fetch(:verbose) { false }      
       $stdout.sync = true
 
-      ENV['TEST_ENV_NUMBER'] = Process.pid.to_s 
+      ENV['TEST_ENV_NUMBER'] = Process.pid.to_s
       begin
-        # output = `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:reset`
-        # trace "DB:RESET -> #{output}"
-        trace "================="
-        trace `pwd`
+        output = `rake db:reset TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test`
+        trace "DB:RESET -> #{output}"
       rescue Exception => e
         trace "Error creating test DB: #{e}"
       end
-
+      
       trace 'Booted. Sending Request for file'
 
       @io.write RequestFile.new
@@ -65,10 +63,8 @@ module Hydra #:nodoc:
     # Stop running
     def stop
       begin
-        output = `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:drop`
+        output = `rake db:drop TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test`
         trace "DB:DROP -> #{output}"
-        p "DB:DROP ========"
-        p output
       rescue Exception => e
         trace "Could not drop test database #{ENV['TEST_ENV_NUMBER']}: #{e}"
       end
