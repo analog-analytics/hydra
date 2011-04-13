@@ -24,6 +24,8 @@ module Hydra #:nodoc:
       begin
         output = `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:reset`
         trace "DB:RESET -> #{output}"
+        p "DB:RESET ========"
+        p output
       rescue Exception => e
         trace "Error creating test DB: #{e}"
       end
@@ -65,6 +67,8 @@ module Hydra #:nodoc:
       begin
         output = `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:drop`
         trace "DB:DROP -> #{output}"
+        p "DB:DROP ========"
+        p output
       rescue Exception => e
         trace "Could not drop test database #{ENV['TEST_ENV_NUMBER']}: #{e}"
       end
