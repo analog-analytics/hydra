@@ -22,7 +22,7 @@ module Hydra #:nodoc:
 
       ENV['TEST_ENV_NUMBER'] = Process.pid.to_s 
       begin
-        Rake::Task['db:reset'].invoke        
+        `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:reset`
       rescue Exception => e
         trace "Error creating test DB: #{e}"
       end
@@ -62,7 +62,7 @@ module Hydra #:nodoc:
     # Stop running
     def stop
       begin
-        Rake::Task['db:drop'].invoke
+        `TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test rake db:drop`
       rescue Exception => e
         trace "Could not drop test database #{ENV['TEST_ENV_NUMBER']}: #{e}"
       end
