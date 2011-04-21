@@ -11,7 +11,6 @@ module Hydra #:nodoc:
       raise IOError unless @reader
       message = @reader.gets
       return nil unless message
-      return nil unless message.chomp.starts_with?('.') || message.chomp.starts_with?('{')
       return Message.build(eval(message.chomp))
     rescue SyntaxError, NameError
       # uncomment to help catch remote errors by seeing all traffic
