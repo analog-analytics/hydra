@@ -35,8 +35,6 @@ module Hydra #:nodoc:
       trace "Initialized"
       trace "  Worker: (#{worker_opts.inspect})"
       trace "  Sync:   (#{sync_opts.inspect})"
-
-      sync
     end
 
     def sync
