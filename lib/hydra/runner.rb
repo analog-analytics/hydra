@@ -20,7 +20,7 @@ module Hydra #:nodoc:
       @verbose = opts.fetch(:verbose) { false }      
       $stdout.sync = true
       
-      ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{index}"
+      ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{opts.fetch(:index)}"
 
       trace 'Booted. Sending Request for file'
 
