@@ -234,6 +234,7 @@ module Hydra #:nodoc:
     end
   end
 
+
   # Setup a task that will be run across all remote workers
   #   Hydra::RemoteTask.new('db:reset')
   #
@@ -292,7 +293,7 @@ module Hydra #:nodoc:
       writer, reader, error = popen3("ssh -tt #{ssh_opts} #{worker['connect']} ")
       writer.write("cd #{worker['directory']}\n")
       writer.write "echo BEGIN HYDRA\n"
-      writer.write("RAILS_ENV=#{environment} rake #{@name}\n")
+      writer.write("RAILS_ENV=#{environment} bundle exec rake #{@name}\n")
       writer.write "echo END HYDRA\n"
       writer.write("exit\n")
       writer.close
