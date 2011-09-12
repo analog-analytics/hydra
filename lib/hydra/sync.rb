@@ -38,7 +38,7 @@ module Hydra #:nodoc:
     end
 
     def sync
-      #trace "Synchronizing with #{connect}\n\t#{sync_opts.inspect}"
+      # trace "Synchronizing with #{connect}\n\t#{@ssh_opts.inspect}"
       exclude_opts = @exclude_paths.inject(''){|memo, path| memo += "--exclude=#{path} "}
 
       rsync_command = [
@@ -83,9 +83,9 @@ module Hydra #:nodoc:
         @listeners << Thread.new do
           begin
             trace "Syncing #{worker_opts.inspect}"
-            Sync.new worker_opts, @sync, @verbose
-          rescue 
-            trace "Syncing failed [#{worker_opts.inspect}]"
+            Sync.new(worker_opts, @sync, @verbose).sync
+          rescue Exception => e
+            trace "Syncing failed [#{worker_opts.inspect}] #{e}"
           end
         end
       end
