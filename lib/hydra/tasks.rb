@@ -110,10 +110,6 @@ module Hydra #:nodoc:
     def define
       desc "Hydra Tests" + (@name == :hydra ? "" : " for #{@name}")
       task @name do
-        if Object.const_defined?('Rails') && Rails.env == 'development'
-          $stderr.puts %{WARNING: Rails Environment is "development". Make sure to set it properly (ex: "RAILS_ENV=test rake hydra")}
-        end
-
         master = Hydra::Master.new(@opts)
         unless master.failed_files.empty?
           raise "Hydra: Not all tests passes"
