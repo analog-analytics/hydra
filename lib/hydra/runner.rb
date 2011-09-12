@@ -19,15 +19,9 @@ module Hydra #:nodoc:
       @io = opts.fetch(:io) { raise "No IO Object" } 
       @verbose = opts.fetch(:verbose) { false }      
       $stdout.sync = true
-
-      ENV['TEST_ENV_NUMBER'] = Process.pid.to_s
-      begin
-        output = `rake db:reset TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test`
-        trace "DB:RESET -> #{output}"
-      rescue Exception => e
-        trace "Error creating test DB: #{e}"
-      end
       
+      ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{index}"
+
       trace 'Booted. Sending Request for file'
 
       @io.write RequestFile.new
@@ -62,13 +56,6 @@ module Hydra #:nodoc:
 
     # Stop running
     def stop
-      begin
-        output = `rake db:drop TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test`
-        trace "DB:DROP -> #{output}"
-      rescue Exception => e
-        trace "Could not drop test database #{ENV['TEST_ENV_NUMBER']}: #{e}"
-      end
-
       @running = false
     end
 
