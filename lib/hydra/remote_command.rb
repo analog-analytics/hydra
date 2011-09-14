@@ -49,7 +49,7 @@ module Hydra #:nodoc:
         if success_text.nil? || line[success_text]
           succeeded = true
         end
-        @results[worker] = (@results[worker] || "") + line
+        @results[worker] = (@results[worker] || "") + "#{line}\n"
       end
     
       if !succeeded
