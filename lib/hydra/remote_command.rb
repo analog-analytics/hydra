@@ -13,13 +13,15 @@ module Hydra #:nodoc:
       environment = config.fetch('environment') { 'test' }
       workers = config.fetch('workers') { [] }
       workers = workers.select{|w| w['type'] == 'ssh'}
-
+      
       Thread.abort_on_exception = true
       @listeners = []
       @results = {}
       workers.each do |worker|
         @listeners << Thread.new do
           begin
+            remote_user = worker["connect"][/([^@]+)@/, 1] || ENV["USER"]
+            remote_command.gsub!("$remote_user", remote_user)
             run_remote_command(worker, environment, remote_command, success_text, verbose)
           rescue 
             @results[worker] = "==== #{@name} failed for #{worker['connect']} ====\n#{$!.inspect}\n#{$!.backtrace.join("\n")}"
