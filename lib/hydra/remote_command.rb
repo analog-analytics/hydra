@@ -21,9 +21,9 @@ module Hydra #:nodoc:
         @listeners << Thread.new do
           begin
             remote_user = worker["connect"][/([^@]+)@/, 1] || ENV["USER"]
-            remote_command.gsub!("$remote_user", remote_user)
-            run_remote_command(worker, environment, remote_command, success_text, verbose)
-          rescue 
+            remote_command_with_subs = remote_command.gsub("$remote_user", remote_user)
+            run_remote_command(worker, environment, remote_command_with_subs, success_text, verbose)
+          rescue
             @results[worker] = "==== #{@name} failed for #{worker['connect']} ====\n#{$!.inspect}\n#{$!.backtrace.join("\n")}"
           end
         end
