@@ -53,7 +53,7 @@ module Hydra #:nodoc:
     #
     #   t.add_files 'test/units/*.rb'
     def add_files(pattern)
-      @files += Dir.glob(pattern)
+      @files += Dir.glob(pattern).shuffle
     end
 
   end
