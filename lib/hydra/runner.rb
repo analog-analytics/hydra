@@ -107,8 +107,8 @@ module Hydra #:nodoc:
         output << value
       end
 
-      klasses = Runner.find_classes_in_file(file)
       begin
+        klasses = Runner.find_classes_in_file(file)
         klasses.each{|klass| klass.suite.run(@result){|status, name| ;}}
       rescue => ex
         output << format_ex_in_file(file, ex)
@@ -231,28 +231,39 @@ module Hydra #:nodoc:
       end
     end
 
-    # find all the test unit classes in a given file, so we can run their suites
-    def self.find_classes_in_file(f)
-      code = ""
-      File.open(f) {|buffer| code = buffer.read}
-      matches = code.scan(/class\s+([\S]+)/)
+    def self.find_classes_in_file(f)     
+      matches = File.read(f).scan(/(hydra\s+){0,1}class\s+([\S]+)/)
       klasses = matches.collect do |c|
-        begin
-          if c.first.respond_to? :constantize
-            c.first.constantize
-          else
-            eval(c.first)
+        is_hydra_class = c.first.present?
+        klass_name = c.last  
+
+        begin                
+          klass = if klass_name.respond_to? :constantize
+            klass_name.constantize          
+          else               
+            eval(klass_name) 
+          end                
+
+          if is_hydra_class && !klass.respond_to?(:suite)
+            raise "file '#{f}' contains hydra class #{klass_name}, but class #{klass_name} is not a test class"
+          else               
+            klass            
+          end                
+        rescue NameError     
+          if is_hydra_class  
+            raise "file '#{f}' contains hydra class #{klass_name}, but class #{klass_name} is not defined"
           end
-        rescue NameError
-          # means we could not load [c.first], but thats ok, its just not
-          # one of the classes we want to test
-          nil
         rescue SyntaxError
-          # see above
           nil
         end
       end
-      return klasses.select{|k| k.respond_to? 'suite'}
+      found_klasses = klasses.select { |k| k.respond_to?(:suite) }
+      if found_klasses.blank?
+        raise "expected to find at least one test class in file '#{f}', but found none. " +
+              "did you declare your class with 'hydra class Some::Class'? is it inheriting " +
+              "from the right test class?"    
+      end
+      found_klasses
     end
 
     # Yanked a method from Cucumber
