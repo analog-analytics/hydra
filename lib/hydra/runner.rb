@@ -234,7 +234,7 @@ module Hydra #:nodoc:
     def self.find_classes_in_file(f)     
       matches = File.read(f).scan(/(hydra\s+){0,1}class\s+([\S]+)/)
       klasses = matches.collect do |c|
-        is_hydra_class = c.first.present?
+        is_hydra_class = !c.first.nil?
         klass_name = c.last  
 
         begin                
