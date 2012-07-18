@@ -19,8 +19,18 @@ module Hydra #:nodoc:
       @io = opts.fetch(:io) { raise "No IO Object" }
       @runners = []
       @listeners = []
+      @options = opts.fetch(:options) { "" }
 
       load_worker_initializer
+
+      @runner_event_listeners = Array(opts.fetch(:runner_listeners) { nil })
+      @runner_event_listeners.select{|l| l.is_a? String}.each do |l|
+        @runner_event_listeners.delete_at(@runner_event_listeners.index(l))
+        listener = eval(l)
+        @runner_event_listeners << listener if listener.is_a?(Hydra::RunnerListener::Abstract)
+      end
+      @runner_log_file = opts.fetch(:runner_log_file) { nil }
+
       boot_runners(opts.fetch(:runners) { 1 })
       @io.write(Hydra::Messages::Worker::WorkerBegin.new)
 
@@ -82,9 +92,10 @@ module Hydra #:nodoc:
       index = 0
       num_runners.times do
         pipe = Hydra::Pipe.new
+
         child = SafeFork.fork do
           pipe.identify_as_child
-          Hydra::Runner.new(:io => pipe, :verbose => @verbose, :index => index)
+          Hydra::Runner.new(:io => pipe, :verbose => @verbose, :index => index, :runner_listeners => @runner_event_listeners, :runner_log_file => @runner_log_file, :options => @options)
         end
         pipe.identify_as_parent
         @runners << { :pid => child, :io => pipe, :idle => false }
@@ -123,7 +134,7 @@ module Hydra #:nodoc:
             end
           rescue IOError => ex
             trace "Worker lost Master"
-            Thread.exit
+            shutdown
           end
         end
       end
