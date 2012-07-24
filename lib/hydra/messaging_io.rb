@@ -12,6 +12,7 @@ module Hydra #:nodoc:
         begin
           raise IOError unless @reader
           message = @reader.gets
+          $stdout.write message
           return nil unless message
           return Message.build(eval(message.chomp))
         rescue SyntaxError, NameError, ArgumentError
