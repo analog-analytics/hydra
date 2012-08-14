@@ -22,8 +22,10 @@ module Hydra #:nodoc:
 
       # output the report
       def testing_end
-        YAML.dump(@report, @output)
-        @output.close
+        puts "========= REPORT"
+        @report.each do |f|
+          puts "#{f[1]['duration']} - #{f[0]}"
+        end
       end
     end
   end
