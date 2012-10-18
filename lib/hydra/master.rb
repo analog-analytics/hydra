@@ -175,7 +175,7 @@ module Hydra #:nodoc:
         # Analog command
         # "RAILS_ENV=#{@environment} bundle exec ruby -e \"require 'rubygems'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new, :runners => #{runners}, :verbose => #{@verbose}, :runner_listeners => \'#{@string_runner_event_listeners}\', :runner_log_file => \'#{@runner_log_file}\' );\""
         # exit at the end so it the worker borks the ssh connection gets closed and we don't wait on io
-        "RAILS_ENV=#{@environment} ruby -e \"require 'rubygems'; require 'bundler/setup'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new(:verbose => #{@verbose}), :runners => #{runners}, :verbose => #{@verbose}, :test_opts => '#{@test_opts}', :test_failure_guard_regexp => '#{@test_failure_guard_regexp}', :runner_listeners => \'#{@string_runner_event_listeners}\', :runner_log_file => \'#{@runner_log_file}\', :remote => '#{sync.connect}' );\" 2>&1 | tee #{tee_flags} log/hydra_worker.log; exit"
+        "RAILS_ENV=#{@environment} bundle exec ruby -e \"require 'rubygems'; require 'bundler/setup'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new(:verbose => #{@verbose}), :runners => #{runners}, :verbose => #{@verbose}, :test_opts => '#{@test_opts}', :test_failure_guard_regexp => '#{@test_failure_guard_regexp}', :runner_listeners => \'#{@string_runner_event_listeners}\', :runner_log_file => \'#{@runner_log_file}\', :remote => '#{sync.connect}' );\" 2>&1 | tee #{tee_flags} log/hydra_worker.log; exit"
       }
 
       trace "Booting SSH worker"
