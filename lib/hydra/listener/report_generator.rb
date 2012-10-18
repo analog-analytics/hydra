@@ -22,10 +22,13 @@ module Hydra #:nodoc:
 
       # output the report
       def testing_end
-        puts "========= REPORT"
-        @report.each do |f|
-          puts "#{f[1]['duration']} - #{f[0]}"
-        end
+        @output.rewind
+        old_report = YAML.load(@output) || {}
+        new_report = old_report.merge(@report)
+        @output.truncate(0)
+        @output.rewind
+        YAML.dump(new_report, @output)
+        @output.close
       end
     end
   end

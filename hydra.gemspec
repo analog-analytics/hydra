@@ -5,7 +5,7 @@
 
 Gem::Specification.new do |s|
   s.name = %q{hydra}
-  s.version = "0.24.5"
+  s.version = "0.24.5.1"
 
   s.required_rubygems_version = Gem::Requirement.new(">= 0") if s.respond_to? :required_rubygems_version=
   s.authors = ["Nick Gauthier"]
@@ -30,7 +30,7 @@ Gem::Specification.new do |s|
      "hydra.gemspec",
      "hydra_gray.png",
      "lib/hydra.rb",
-     "lib/hydra/cucumber/formatter.rb",
+     "lib/hydra/cucumber/hydra_formatter.rb",
      "lib/hydra/hash.rb",
      "lib/hydra/js/lint.js",
      "lib/hydra/listener/abstract.rb",
@@ -105,6 +105,8 @@ Gem::Specification.new do |s|
      "test/runner_test.rb",
      "test/worker_test.rb"
   ]
+
+  s.add_dependency(%q<SyslogLogger>, ["= 1.4.0"])
 
   if s.respond_to? :specification_version then
     current_version = Gem::Specification::CURRENT_SPECIFICATION_VERSION

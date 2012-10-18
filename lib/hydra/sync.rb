@@ -7,7 +7,7 @@ module Hydra #:nodoc:
     traceable('SYNC')
     self.class.traceable('SYNC MANY')
 
-    attr_reader :connect, :ssh_opts, :remote_dir
+    attr_reader :connect, :ssh_opts, :remote_dir, :worker_opts
 
     # Create a new Sync instance to rsync source from the local machine to a remote worker
     #
@@ -20,45 +20,60 @@ module Hydra #:nodoc:
     # * :verbose
     #   * Set to true to see lots of Hydra output (for debugging)
     def initialize(worker_opts, sync_opts, verbose = false)
-      worker_opts ||= {}
-      worker_opts.stringify_keys!
+      trace "  Sync:   (#{sync_opts.inspect})"
+      @worker_opts = worker_opts || {}
+      @worker_opts.stringify_keys!
       @verbose = verbose
-      @connect = worker_opts.fetch('connect') { raise "You must specify an SSH connection target" }
-      @ssh_opts = worker_opts.fetch('ssh_opts') { "" }
-      @remote_dir = worker_opts.fetch('directory') { raise "You must specify a remote directory" }
+      @connect = @worker_opts.fetch('connect') { raise "You must specify an SSH connection target" }
+      @ssh_opts = @worker_opts.fetch('ssh_opts') { "" }
+      @remote_dir = @worker_opts.fetch('directory') { raise "You must specify a remote directory" }
 
       return unless sync_opts
       sync_opts.stringify_keys!
       @local_dir = sync_opts.fetch('directory') { raise "You must specify a synchronization directory" }
       @exclude_paths = sync_opts.fetch('exclude') { [] }
+      @rsync_opts = sync_opts.fetch('rsync_opts') { "" }
 
       trace "Initialized"
-      trace "  Worker: (#{worker_opts.inspect})"
+      trace "  Worker: (#{@worker_opts.inspect})"
       trace "  Sync:   (#{sync_opts.inspect})"
     end
 
     def sync
-      # trace "Synchronizing with #{connect}\n\t#{@ssh_opts.inspect}"
+      # make directory to sync to
+      ssh = Hydra::SSH.new("#{@ssh_opts} #{@connect}", @remote_dir, "exit", :verbose => @verbose)
+      ssh.close
+      
+      #trace "Synchronizing with #{connect}\n\t#{sync_opts.inspect}"
       exclude_opts = @exclude_paths.inject(''){|memo, path| memo += "--exclude=#{path} "}
 
       rsync_command = [
+        'time',
         'rsync',
         '-avz',
         '--delete',
         exclude_opts,
         File.expand_path(@local_dir)+'/',
         "-e \"ssh #{@ssh_opts}\"",
+        @rsync_opts,
         "#{@connect}:#{@remote_dir}"
       ].join(" ")
+      rsync_command = "(#{rsync_command}) 2>&1" # capture all output
       trace rsync_command
-      trace `#{rsync_command}`
+      output = `#{rsync_command}`
+      status = $?
+      if status.success?
+        trace "rsync output #{@connect}:" + output
+      else
+        raise "rsync failed with output: #{output}"
+      end
     end
 
     def self.sync_many opts
       opts.stringify_keys!
       config_file = opts.delete('config') { nil }
       if config_file
-        opts.merge!(YAML.load_file(config_file).stringify_keys!)
+        opts.merge!(Hydra.load_config(config_file))
       end
       @verbose = opts.fetch('verbose') { false }
       @sync = opts.fetch('sync') { {} }
@@ -79,13 +94,15 @@ module Hydra #:nodoc:
       Thread.abort_on_exception = true
       trace "Processing workers"
       @listeners = []
-      @remote_worker_opts.each do |worker_opts|
+      syncers = @remote_worker_opts.map { |worker_opts| Sync.new(worker_opts, @sync.dup, @verbose) }
+      syncers.each do |syncer|
         @listeners << Thread.new do
           begin
-            trace "Syncing #{worker_opts.inspect}"
-            Sync.new(worker_opts, @sync, @verbose).sync
-          rescue Exception => e
-            trace "Syncing failed [#{worker_opts.inspect}] #{e}"
+            trace "Syncing #{syncer.worker_opts.inspect}"
+            syncer.sync
+          rescue 
+            trace "Syncing failed [#{syncer.worker_opts.inspect}]\n#{$!.message}\n#{$!.backtrace}"
+            raise
           end
         end
       end

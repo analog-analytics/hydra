@@ -1,6 +1,9 @@
-require 'test/unit'
-require 'test/unit/testresult'
-Test::Unit.run = true
+# require 'test/unit'
+# require 'test/unit/testresult'
+# Test::Unit.run = true
+require 'thread'
+require 'timeout'
+require 'tempfile'
 
 module Hydra #:nodoc:
   # Hydra class responsible for running test files.
@@ -13,24 +16,342 @@ module Hydra #:nodoc:
   class Runner
     include Hydra::Messages::Runner
     traceable('RUNNER')
+
+    DEFAULT_LOG_FILE = File.join('log', 'hydra-runner.log')
+    LOCK = Mutex.new
+
     # Boot up a runner. It takes an IO object (generally a pipe from its
     # parent) to send it messages on which files to execute.
     def initialize(opts = {})
-      @io = opts.fetch(:io) { raise "No IO Object" } 
-      @verbose = opts.fetch(:verbose) { false }      
+      @verbose = opts.fetch(:verbose) { false }
+      @runner_num = opts[:runner_num]
+      @runner_log_file = opts[:runner_log_file]
+      @runner_log_file = DEFAULT_LOG_FILE + @runner_num.to_s if ["", nil].include? @runner_log_file
+      redirect_output( @runner_log_file )
+      reg_trap_sighup
+
+      @io = opts.fetch(:io) { raise "No IO Object" }
+      @remote = opts.fetch(:remote) { false }      
+      @event_listeners = Array( opts.fetch( :runner_listeners ) { nil } )
+
       $stdout.sync = true
       
       ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{opts.fetch(:index)}"
 
-      trace 'Booted. Sending Request for file'
+      @test_opts = opts.fetch(:test_opts) { "" }
+      @test_failure_guard_regexp = opts.fetch(:test_failure_guard_regexp) { "" }
 
+      ENV['HYDRA_VERBOSE'] = "true" if @verbose
+
+      trace 'Creating test database'
+      parent_pid = Process.pid
+      ENV['TEST_ENV_NUMBER'] = parent_pid.to_s
+      begin
+        
+        
+        srand # since we've forked the runner we need to reseed
+        
+        memcached_pid_file_name = "#{Dir.pwd}/log/runner_#{@runner_num}_memcached.pid"
+        memcached_log_file_name = "#{Dir.pwd}/log/memcached_#{@runner_num.to_s}.log"
+        run_dependent_process(memcached_pid_file_name, memcached_log_file_name) do
+          LOCK.synchronize do
+            ENV['MEMCACHED_PORT'] = find_open_port.to_s
+          end
+          "memcached -vvvd -P #{memcached_pid_file_name} -p #{ENV['MEMCACHED_PORT']}"
+        end
+        
+
+        redis_pid_file_name = "#{Dir.pwd}/log/runner_#{@runner_num}_redis.pid"
+        redis_log_file_name = "#{Dir.pwd}/log/redis_#{@runner_num.to_s}.log"
+        run_dependent_process(redis_pid_file_name, redis_log_file_name) do
+          LOCK.synchronize do
+            ENV['REDIS_PORT'] = find_open_port.to_s
+          end
+          
+          config_contents = <<-CONFIG
+# written #{Time.now.to_f.to_s}   #{Time.now.to_s}
+port #{ENV['REDIS_PORT']}
+loglevel debug
+pidfile #{redis_pid_file_name}
+logfile #{redis_log_file_name}
+# so it creates the pid file
+daemonize yes
+# trying to resolve EAGAIN redis connections errors, my latest thought is that it coincides with dumping the redis db to disk, so let's turn that off
+timeout 0
+# databases 16
+# rdbcompression yes
+# dbfilename dump_#{@runner_num.to_s}.rdb
+# dir #{File.dirname(redis_pid_file_name)}
+appendonly no
+appendfsync no
+          CONFIG
+          trace "runner #{@runner_num.to_s} redis config: #{config_contents}"
+          redis_config_file = File.open("#{Dir.pwd}/tmp/redis_#{@runner_num.to_s}_config", "w") # Tempfile.new("redis-hydra")
+          redis_config_file.puts config_contents
+          redis_config_file.flush
+          
+          "redis-server #{redis_config_file.path}"
+        end
+
+        
+        wait_for_processes_to_start
+        
+        
+        trace "DB DROP FORK before fork env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+        # this should really clean up after the runner dies
+        fork do
+          Hydra.send(:remove_const, :WRITE_LOCK)
+          Hydra.const_set(:WRITE_LOCK, Monitor.new)
+          trace "DB DROP FORK before setsid env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+          Process.setsid
+          trace "DB DROP FORK after setsid env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+          trap 'SIGHUP', 'IGNORE'
+          fork do
+            begin
+              3.upto(1023) do |fd|
+                begin
+                  if io = IO::new(fd)
+                    io.close
+                  end
+                rescue
+                end
+              end
+              STDIN.reopen '/dev/null'
+              redirect_output( @runner_log_file + 'cleanup' )
+              
+              memcached_pid = pid_from_file(memcached_pid_file_name, memcached_log_file_name)
+              redis_pid = pid_from_file(redis_pid_file_name, redis_log_file_name)
+              start = Time.now
+              six_hours = 60 * 60 * 6 # if this fork somehow sticks around 6 hours, shut 'er down
+
+              i = 0
+              interval = 0.1
+              while (Process.kill(0, parent_pid) rescue nil) and Time.now < start + six_hours
+                if (i += 1) % (60 / interval) == 0
+                  trace "DB DROP FORK loop env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+                end
+                sleep interval
+              end
+              # sometimes the db drop dies because redis is already dead, should we just use mysql?
+              cmd = <<-CMD
+                rake db:drop --trace 2>&1
+              CMD
+              trace "DB DROP FORK after loop env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+              trace "DB DROP FORK run env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid} -> " + `#{cmd}`
+              
+              trace "DB DROP FORK before kill memcached env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+              kill_external_process_pid(memcached_pid, memcached_pid_file_name, memcached_log_file_name)
+              trace "DB DROP FORK before kill redis env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+              kill_external_process_pid(redis_pid, redis_pid_file_name, redis_log_file_name)
+              trace "DB DROP FORK after killing env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}"
+            rescue Exception => e
+              puts "DB DROP FORK exception env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}, exception: #{e.inspect}, backtrace: #{e.backtrace}"
+              trace "DB DROP FORK exception env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}, exception: #{e.inspect}, backtrace: #{e.backtrace}"
+            ensure
+              puts "DB DROP FORK ensure env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}, exception: #{$!.inspect}, backtrace: #{$! && $!.backtrace}"
+              trace "DB DROP FORK ensure env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} parent pid: #{parent_pid}, my pid: #{Process.pid}, exception: #{$!.inspect}, backtrace: #{$! && $!.backtrace}"
+            end
+          end
+        end
+        
+
+        run_shell_command("rake db:drop --trace 2>&1", "DB DROP")
+        run_shell_command("rake db:create:all --trace 2>&1", "DB CREATE")
+        
+        ENV['SKIP_ROLLOUT_FETCH'] = "true"
+        
+        old_env = ENV['RAILS_ENV']
+        ENV['RAILS_ENV'] = "development"
+        run_shell_command("rake db:test:load_structure --trace 2>&1", "DB LOAD STRUCTURE")
+        ENV['RAILS_ENV'] = old_env
+        
+
+      rescue Exception => e
+        trace "Error creating test DB: #{e}\n#{e.backtrace}"
+        raise
+      end
+
+      trace 'Booted. Sending Request for file'
+      
+      runner_begin
+
+      trace 'Booted. Sending Request for file'
       @io.write RequestFile.new
       begin
         process_messages
       rescue => ex
-        trace ex.to_s
+        trace "Caught exception while processing messages: #{ex.inspect}\n#{ex.backtrace}"
         raise ex
       end
+    end
+    
+    def run_shell_command(cmd, msg)
+      result = `#{cmd}`
+      status = $?
+      trace_msg = "#{msg} env: #{ENV['RAILS_ENV']} #{ENV['TEST_ENV_NUMBER']} (exited: #{status.inspect}) -> #{result}"
+      trace trace_msg
+      raise "Error running #{cmd} #{trace_msg}" unless status.success?
+    end
+
+    def wait_for_processes_to_start
+      trace "runner #{@runner_num.to_s} about to enter waiting for services to start loop"
+      loop do
+        trace "runner #{@runner_num.to_s} waiting for services to start..."
+        finished = false
+        ports = nil
+        LOCK.synchronize do
+          ports = [
+                   ENV['MEMCACHED_PORT'],
+                   ENV['REDIS_PORT']
+                  ].map { |p| p.to_i }
+        end
+        if ports.all? { |p| is_port_in_use?(p) }
+          finished = true
+        end
+        if finished
+          trace "runner #{@runner_num.to_s} services should be done starting"
+          break
+        end
+        sleep 1
+      end
+    end
+
+    def kill_external_process_pid(pid, pid_file_name, log_file_name)
+      trace "run_dependent_process found pid runner: #{@runner_num} pid: #{pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+      if pid > 0
+        trace "run_dependent_process before killing loop runner: #{@runner_num} pid: #{pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+        ["TERM", "KILL"].each do |signal|
+          tries = 20
+          while(Process.kill(0, pid) rescue nil)
+            trace "run_dependent_process before kill runner: #{@runner_num} pid: #{pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+            Process.kill(signal, pid)
+            sleep 0.1
+            tries -= 1
+            if tries == 0
+              raise "Could not kill previous process runner: #{@runner_num} pid: #{pid}, pid: #{pid_file_name}, log: #{log_file_name}" if signal == "KILL"
+              break
+            end
+          end
+        end
+      end
+    end
+    
+    def pid_from_file(pid_file_name, log_file_name)
+      if File.exist?(pid_file_name)
+        trace "run_dependent_process found pid file runner: #{@runner_num} pid: #{pid_file_name}, log: #{log_file_name}"
+        File.read(pid_file_name).strip.to_i
+      end
+    end
+    
+    def kill_external_process_pid_file(pid_file_name, log_file_name)
+      if pid = pid_from_file(pid_file_name, log_file_name)
+        kill_external_process_pid(pid, pid_file_name, log_file_name)
+      end
+      trace "run_dependent_process after killing old runner: #{@runner_num} pid: #{pid} pid: #{pid_file_name}, log: #{log_file_name}, remaining processes pid:#{`pgrep -fl '(redis-server /zynga|memcached -vvv)' | grep #{pid}`},  remaining processes full:#{`pgrep -fl '(redis-server /zynga|memcached -vvv)'`}"
+    end
+    
+    def run_dependent_process(pid_file_name, log_file_name, &command_block)
+      trace "run_dependent_process start runner: #{@runner_num} pid: #{pid_file_name}, log: #{log_file_name}"
+      
+      trace "run_dependent_process before thread runner: #{@runner_num} pid: #{pid_file_name}, log: #{log_file_name}"
+      Thread.new do
+        trace "run_dependent_process inside thread runner: #{@runner_num} pid: #{pid_file_name}, log: #{log_file_name}"
+        tries = 0
+        loop do
+          tries += 1
+          stop && break if tries > 10
+          cmd = yield
+          cmd = "strace -fF -ttt -s 200 #{cmd}" if @verbose
+          trace "run_dependent_process before fork runner #{@runner_num} cmd: #{cmd}"
+          puts "running: #{cmd}"
+          child_pid = fork do
+            @io.close
+            file = File.open(log_file_name + "-out", "w")
+            STDOUT.reopen(file)
+            STDERR.reopen(file)
+            exec cmd
+          end
+          Process.detach child_pid
+          trace "run_dependent_process before exec wait runner: #{@runner_num} child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+          Process.wait child_pid
+          trace "run_dependent_process after exec wait runner: #{@runner_num} child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+          
+          trace "run_dependent_process before pid file wait read runner: #{@runner_num} child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+          
+          # Wait for a new pid file if the old one is in place
+          10.times do
+            if File.exist?(pid_file_name) && File.mtime(pid_file_name) > (Time.now - 5)
+              trace "run_dependent_process found pid file runner: #{@runner_num} child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+              break
+            end
+            trace "run_dependent_process waiting to read loop pid file runner: #{@runner_num} child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+            sleep 0.2
+          end
+          if File.exist?(pid_file_name)
+            trace "run_dependent_process found pid file again runner: #{@runner_num} child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+            pid = File.read(pid_file_name).strip.to_i
+            trace "run_dependent_process found pid from file runner: #{@runner_num} pid: #{pid}, child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+            if pid > 0
+              trace "run_dependent_process before pid file wait actual wait runner: #{@runner_num} pid: #{pid}, child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+              
+              while (Process.kill(0, pid) rescue nil)
+                trace "run_dependent_process before pid file wait loop wait runner: #{@runner_num} pid: #{pid}, child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+                sleep 1
+              end
+              
+            end
+          end
+          trace "run_dependent_process after pid file wait read runner: #{@runner_num} child_pid: #{child_pid}, pid: #{pid_file_name}, log: #{log_file_name}"
+        end
+      end
+    end
+    
+    def find_open_port
+      100.times do
+        port = 10_000 + rand(20_000)
+        trace "runner #{@runner_num.to_s} checking open port: #{port}"
+        unless is_port_in_use?(port)
+          trace "runner #{@runner_num.to_s} found open port: #{port}"
+          return port
+        end
+      end
+      raise "Couldn't find open port"
+    end
+    
+    require 'socket'
+    def is_port_in_use?(port, ip = "localhost")
+      trace "runner #{@runner_num.to_s} is port in use: #{port}"
+      begin
+        Timeout.timeout(1) do
+          begin
+            s = TCPSocket.new(ip, port)
+            s.close
+            trace "runner #{@runner_num.to_s} port is used: #{port}"
+            return true
+          rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+            trace "runner #{@runner_num.to_s} port is free: #{port}"
+            return false
+          end
+        end
+      rescue Timeout::Error
+      end
+     
+      trace "runner #{@runner_num.to_s} port is used: #{port}"
+      return true
+    end
+
+    def reg_trap_sighup
+      for sign in [:SIGHUP, :INT]
+        trap sign do
+          stop
+        end
+      end
+      @runner_began = true
+    end
+
+    def runner_begin
+      trace "Firing runner_begin event"
+      @event_listeners.each {|l| l.runner_begin( self ) }
     end
 
     # Run a test file and report the results
@@ -38,7 +359,7 @@ module Hydra #:nodoc:
       trace "Running file: #{file}"
 
       output = ""
-      if file =~ /_spec.rb$/i
+      if file =~ /_spec.rb$/i || file =~ /spec\/? -e/i
         output = run_rspec_file(file)
       elsif file =~ /.feature$/i
         output = run_cucumber_file(file)
@@ -56,7 +377,29 @@ module Hydra #:nodoc:
 
     # Stop running
     def stop
-      @running = false
+      trace "Dropping test database #{ENV['TEST_ENV_NUMBER']}"
+      ENV['TEST_ENV_NUMBER'] = Process.pid.to_s
+#       begin
+#         output = `rake db:drop --trace TEST_ENV_NUMBER=#{ENV['TEST_ENV_NUMBER']} RAILS_ENV=test 2>&1`
+#         trace "DB:DROP -> #{output}"
+#       rescue Exception => e
+#         trace "Could not drop test database #{ENV['TEST_ENV_NUMBER']}: #{e}\n#{e.backtrace}"
+#       end
+      
+      runner_end if @runner_began
+      @runner_began = @running = false
+      trace "About to close my io"
+      @io.close
+      trace "io closed"
+    end
+
+    def runner_end
+      trace "Ending runner #{self.inspect}"
+      @event_listeners.each {|l| l.runner_end( self ) }
+    end
+
+    def format_exception(ex)
+      "#{ex.class.name}: #{ex.message}\n    #{ex.backtrace.join("\n    ")}"
     end
 
     private
@@ -77,17 +420,14 @@ module Hydra #:nodoc:
           end
         rescue IOError => ex
           trace "Runner lost Worker"
-          @running = false
+          stop
         end
       end
+      trace "Stopped Processing Messages"
     end
 
     def format_ex_in_file(file, ex)
       "Error in #{file}:\n  #{format_exception(ex)}"
-    end
-
-    def format_exception(ex)
-      "#{ex.class.name}: #{ex.message}\n    #{ex.backtrace.join("\n    ")}"
     end
 
     # Run all the Test::Unit Suites in a ruby file
@@ -119,75 +459,21 @@ module Hydra #:nodoc:
 
     # run all the Specs in an RSpec file (NOT IMPLEMENTED)
     def run_rspec_file(file)
-      # pull in rspec
-      begin
-        require 'rspec'
-        require 'hydra/spec/hydra_formatter'
-        # Ensure we override rspec's at_exit
-        RSpec::Core::Runner.disable_autorun!
-      rescue LoadError => ex
-        return ex.to_s
-      end
-      hydra_output = StringIO.new
-
-      config = [
-        '-f', 'RSpec::Core::Formatters::HydraFormatter',
-        file
-      ]
-
-      RSpec.instance_variable_set(:@world, nil)
-      RSpec::Core::Runner.run(config, hydra_output, hydra_output)
-
-      hydra_output.rewind
-      output = hydra_output.read.chomp
-      output = "" if output.gsub("\n","") =~ /^\.*$/
-
-      return output
+      trace "about to process spec file: #{file}"
+      Hydra::TestProcessor::Spec.new(file,
+                                     :verbose => @verbose,
+                                     :runner_num => @runner_num,
+                                     :test_opts => @test_opts,
+                                     :test_failure_guard_regexp => @test_failure_guard_regexp).process!
     end
 
     # run all the scenarios in a cucumber feature file
     def run_cucumber_file(file)
-
-      files = [file]
-      dev_null = StringIO.new
-      hydra_response = StringIO.new
-
-      unless @cuke_runtime
-        require 'cucumber'
-        require 'hydra/cucumber/formatter'
-        Cucumber.logger.level = Logger::INFO
-        @cuke_runtime = Cucumber::Runtime.new
-        @cuke_configuration = Cucumber::Cli::Configuration.new(dev_null, dev_null)
-        @cuke_configuration.parse!(['features']+files)
-
-        support_code = Cucumber::Runtime::SupportCode.new(@cuke_runtime, @cuke_configuration.guess?)
-        support_code.load_files!(@cuke_configuration.support_to_load + @cuke_configuration.step_defs_to_load)
-        support_code.fire_hook(:after_configuration, @cuke_configuration)
-        # i don't like this, but there no access to set the instance of SupportCode in Runtime
-        @cuke_runtime.instance_variable_set('@support_code',support_code)
-      end
-      cuke_formatter = Cucumber::Formatter::Hydra.new(
-        @cuke_runtime, hydra_response, @cuke_configuration.options
-      )
-
-      cuke_runner ||= Cucumber::Ast::TreeWalker.new(
-        @cuke_runtime, [cuke_formatter], @cuke_configuration
-      )
-      @cuke_runtime.visitor = cuke_runner
-
-      loader = Cucumber::Runtime::FeaturesLoader.new(
-        files,
-        @cuke_configuration.filters,
-        @cuke_configuration.tag_expression
-      )
-      features = loader.features
-      tag_excess = tag_excess(features, @cuke_configuration.options[:tag_expression].limits)
-      @cuke_configuration.options[:tag_excess] = tag_excess
-
-      cuke_runner.visit_features(features)
-
-      hydra_response.rewind
-      return hydra_response.read
+      Hydra::TestProcessor::Cucumber.new(file,
+                                     :verbose => @verbose,
+                                     :runner_num => @runner_num,
+                                     :test_opts => @test_opts,
+                                     :test_failure_guard_regexp => @test_failure_guard_regexp).process!
     end
 
     def run_javascript_file(file)
@@ -276,6 +562,23 @@ module Hydra #:nodoc:
           nil
         end
       end.compact
+    end
+
+    def redirect_output file_name
+      file = nil
+      file_flags = @verbose ? "a" : "w"
+      begin
+        file = File.open(file_name, file_flags)
+      rescue
+        # it should always redirect output in order to handle unexpected interruption
+        # successfully
+        file = File.open(DEFAULT_LOG_FILE, file_flags)
+      end
+      $stdout.reopen(file)
+      $stderr.reopen(file)
+      $stdout.sync = true
+      $stderr.sync = true
+      trace "redirected output to: #{file.path}"
     end
   end
 end

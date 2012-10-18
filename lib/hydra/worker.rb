@@ -15,12 +15,27 @@ module Hydra #:nodoc:
     # * io: The IO object to use to communicate with the master
     # * num_runners: The number of runners to launch
     def initialize(opts = {})
+      Encoding.default_external = Encoding::UTF_8
+      Encoding.default_internal = Encoding::UTF_8
       @verbose = opts.fetch(:verbose) { false }
+      @remote = opts.fetch(:remote) { false }
       @io = opts.fetch(:io) { raise "No IO Object" }
       @runners = []
       @listeners = []
 
+      @test_opts = opts.fetch(:test_opts) { "" }
+      @test_failure_guard_regexp = opts.fetch(:test_failure_guard_regexp) { "" }
+
       load_worker_initializer
+
+      @runner_event_listeners = Array(opts.fetch(:runner_listeners) { nil })
+      @runner_event_listeners.select{|l| l.is_a? String}.each do |l|
+        @runner_event_listeners.delete_at(@runner_event_listeners.index(l))
+        listener = eval(l)
+        @runner_event_listeners << listener if listener.is_a?(Hydra::RunnerListener::Abstract)
+      end
+      @runner_log_file = opts.fetch(:runner_log_file) { nil }
+
       boot_runners(opts.fetch(:runners) { 1 })
       @io.write(Hydra::Messages::Worker::WorkerBegin.new)
 
@@ -68,27 +83,37 @@ module Hydra #:nodoc:
       @running = false
       trace "Notifying #{@runners.size} Runners of Shutdown"
       @runners.each do |r|
-        trace "Sending Shutdown to Runner"
+        trace "Sending Shutdown to Runner #{r[:runner_num]}"
         trace "\t#{r.inspect}"
-        r[:io].write(Shutdown.new)
+        begin
+          r[:shutdown] = true
+          r[:io].write(Shutdown.new)
+          r[:io].close
+        rescue Exception => e
+          trace "Error shutting down runner #{r[:runner_num]} #{e.message}\n#{e.backtrace}"
+        end
       end
-      Thread.exit
+      exit
     end
 
     private
 
     def boot_runners(num_runners) #:nodoc:
       trace "Booting #{num_runners} Runners"
-      index = 0
-      num_runners.times do
-        pipe = Hydra::Pipe.new
+      num_runners.times do |runner_num|
+        trace "Before runner pipe #{runner_num}"
+        pipe = Hydra::Pipe.new(:verbose => @verbose)
+        trace "After runner pipe #{runner_num}"
         child = SafeFork.fork do
           pipe.identify_as_child
-          Hydra::Runner.new(:io => pipe, :verbose => @verbose, :index => index)
+          at_exit { trace "at_exit #{ENV['TEST_ENV_NUMBER']} #{Process.pid}" }
+          Hydra::Runner.new(:io => pipe, :verbose => @verbose, :test_opts => @test_opts, :test_failure_guard_regexp => @test_failure_guard_regexp, :runner_listeners => @runner_event_listeners, :runner_log_file => @runner_log_file, :remote => @remote, :runner_num => runner_num)
+          trace "After runner, before runner exit"
+          trace Thread.list.inspect
+          exit
         end
         pipe.identify_as_parent
-        @runners << { :pid => child, :io => pipe, :idle => false }
-        index = index + 1
+        @runners << { :pid => child, :io => pipe, :idle => false, :runner_num => runner_num }
       end
       trace "#{@runners.size} Runners booted"
     end
@@ -104,14 +129,15 @@ module Hydra #:nodoc:
       process_messages_from_runners
 
       @listeners.each{|l| l.join }
-      @io.close
       trace "Done processing messages"
+      @io.close
     end
 
     def process_messages_from_master
       @listeners << Thread.new do
         while @running
           begin
+            trace "About to get message from master"
             message = @io.gets
             if message and !message.class.to_s.index("Master").nil?
               trace "Received Message from Master"
@@ -123,9 +149,17 @@ module Hydra #:nodoc:
             end
           rescue IOError => ex
             trace "Worker lost Master"
-            Thread.exit
+            shutdown
           end
         end
+      end
+    end
+
+    def runners_remaining?
+      @runners.any? do |r|
+        res = ! r[:error]
+        trace "no runners remaining? runner: #{r.inspect}: #{res.inspect}"
+        res
       end
     end
 
@@ -134,17 +168,24 @@ module Hydra #:nodoc:
         @listeners << Thread.new do
           while @running
             begin
+              trace "About to get message from runner #{r[:runner_num]}"
               message = r[:io].gets
+              raise IOError if message.nil? # the connection was closed
+              trace "Just got message from runner #{r[:runner_num]}: #{message.inspect}"
               if message and !message.class.to_s.index("Runner").nil?
-                trace "Received Message from Runner"
+                trace "Received Message from Runner #{r[:runner_num]}"
                 trace "\t#{message.inspect}"
                 message.handle(self, r)
               end
-            rescue IOError => ex
+            rescue Object => ex
               trace "Worker lost Runner [#{r.inspect}]"
+              r[:error] = ex
+              shutdown unless runners_remaining?
+              raise unless ex.kind_of?(IOError) && r[:shutdown] # ignore shutdown error
               Thread.exit
             end
           end
+          trace "Done listening to runner #{r[:runner_num]}"
         end
       end
     end
