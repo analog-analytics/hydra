@@ -14,7 +14,7 @@ module Hydra #:nodoc:
     include Hydra::Messages::Master
     include Open3
     traceable('MASTER')
-    attr_reader :failed_files
+    attr_reader :failed_files, :file_count
 
     # Create a new Master
     #
@@ -36,23 +36,9 @@ module Hydra #:nodoc:
     def initialize(opts = { })
       opts.stringify_keys!
       config_file = opts.delete('config') { nil }
-      if config_file
-
-        begin
-          config_erb = ERB.new(IO.read(config_file)).result(binding)
-        rescue Exception => e
-          raise(YmlLoadError,"config file was found, but could not be parsed with ERB.\n#{$!.inspect}")
-        end
-
-        begin
-          config_yml = YAML::load(config_erb)
-        rescue StandardError => e
-          raise(YmlLoadError,"config file was found, but could not be parsed.\n#{$!.inspect}")
-        end
-
-        opts.merge!(config_yml.stringify_keys!)
-      end
+      opts.merge!(Hydra.load_config(config_file)) if config_file
       @files = Array(opts.fetch('files') { nil })
+      @file_count = @files.size
       raise "No files, nothing to do" if @files.empty?
       @incomplete_files = @files.dup
       @failed_files = []
@@ -72,11 +58,16 @@ module Hydra #:nodoc:
       @autosort = opts.fetch('autosort') { true }
       @sync = opts.fetch('sync') { nil }
       @environment = opts.fetch('environment') { 'test' }
-      @options = opts.fetch('options') { '' }
+      @signals = opts.fetch('signals') {
+        ['SIGTERM', 'SIGINT']
+      }
+
+      @test_opts = opts.fetch('test_opts') { '' }
+      @test_failure_guard_regexp = opts.fetch('test_failure_guard_regexp') { '' }
 
       if @autosort
         sort_files_from_report
-        @event_listeners << Hydra::Listener::ReportGenerator.new(File.new(heuristic_file, 'w'))
+        @event_listeners << Hydra::Listener::ReportGenerator.new(File.new(heuristic_file, 'a+'))
       end
 
       # default is one worker that is configured to use a pipe with one runner
@@ -90,6 +81,7 @@ module Hydra #:nodoc:
       @event_listeners.each{|l| l.testing_begin(@files) }
 
       boot_workers worker_cfg
+      trap_signals
       process_messages
     end
 
@@ -121,7 +113,9 @@ module Hydra #:nodoc:
         send_file(worker)
       else
         @incomplete_files.delete_at(@incomplete_files.index(message.file))
-        trace "#{@incomplete_files.size} Files Remaining"
+        remainder = "#{@incomplete_files.size} Files Remaining"
+        remainder << ": #{@incomplete_files.inspect}" if @incomplete_files.size < 100
+        trace remainder
         @event_listeners.each{|l| l.file_end(message.file, message.output) }
         unless message.output == '.'
           @failed_files << message.file
@@ -162,10 +156,10 @@ module Hydra #:nodoc:
     def boot_local_worker(worker)
       runners = worker.fetch('runners') { raise "You must specify the number of runners" }
       trace "Booting local worker"
-      pipe = Hydra::Pipe.new
+      pipe = Hydra::Pipe.new(:verbose => @verbose)
       child = SafeFork.fork do
         pipe.identify_as_child
-        Hydra::Worker.new(:io => pipe, :runners => runners, :verbose => @verbose, :runner_listeners => @string_runner_event_listeners, :runner_log_file => @runner_log_file, :options => @options )
+        Hydra::Worker.new(:io => pipe, :runners => runners, :verbose => @verbose, :runner_listeners => @string_runner_event_listeners, :runner_log_file => @runner_log_file )
       end
 
       pipe.identify_as_parent
@@ -176,22 +170,33 @@ module Hydra #:nodoc:
       sync = Sync.new(worker, @sync, @verbose)
 
       runners = worker.fetch('runners') { raise "You must specify the number of runners"  }
+      tee_flags = @verbose ? "-a" : ""
       command = worker.fetch('command') {
-        "RAILS_ENV=#{@environment} bundle exec ruby -e \"require 'rubygems'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new, :runners => #{runners}, :verbose => #{@verbose}, :runner_listeners => \'#{@string_runner_event_listeners}\', :runner_log_file => \'#{@runner_log_file}\' );\""
+        # Analog command
+        # "RAILS_ENV=#{@environment} bundle exec ruby -e \"require 'rubygems'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new, :runners => #{runners}, :verbose => #{@verbose}, :runner_listeners => \'#{@string_runner_event_listeners}\', :runner_log_file => \'#{@runner_log_file}\' );\""
+        # exit at the end so it the worker borks the ssh connection gets closed and we don't wait on io
+        "RAILS_ENV=#{@environment} ruby -e \"require 'rubygems'; require 'bundler/setup'; require 'hydra'; Hydra::Worker.new(:io => Hydra::Stdio.new(:verbose => #{@verbose}), :runners => #{runners}, :verbose => #{@verbose}, :test_opts => '#{@test_opts}', :test_failure_guard_regexp => '#{@test_failure_guard_regexp}', :runner_listeners => \'#{@string_runner_event_listeners}\', :runner_log_file => \'#{@runner_log_file}\', :remote => '#{sync.connect}' );\" 2>&1 | tee #{tee_flags} log/hydra_worker.log; exit"
       }
 
       trace "Booting SSH worker"
-      ssh = Hydra::SSH.new("#{sync.ssh_opts} #{sync.connect}", sync.remote_dir, command)
+      ssh = Hydra::SSH.new("#{sync.ssh_opts} #{sync.connect}", sync.remote_dir, command, :verbose => @verbose)
       return { :io => ssh, :idle => false, :type => :ssh, :connect => sync.connect }
     end
 
     def shutdown_all_workers
       trace "Shutting down all workers"
-      @workers.each do |worker|
-        worker[:io].write(Shutdown.new) if worker[:io]
-        worker[:io].close if worker[:io]
+      @workers.map do |worker|
+        Thread.new do
+          worker[:io].write(Shutdown.new) if worker[:io]
+          trace "worker[:io]: #{worker[:io].inspect}"
+          begin
+            worker[:io].close if worker[:io]
+          rescue IOError
+          end
+          worker[:listener].exit if worker[:listener]
+        end
       end
-      @listeners.each{|t| t.exit}
+      trace "Shutdown sent to all workers"
     end
 
     def process_messages
@@ -205,18 +210,21 @@ module Hydra #:nodoc:
            if worker.fetch('type') { 'local' }.to_s == 'ssh'
              worker = boot_ssh_worker(worker)
              @workers << worker
+             worker[:listener] = Thread.current
            end
           while true
             begin
+              trace "About to gets from: #{worker.inspect}"
               message = worker[:io].gets
-              trace "got message: #{message}"
+              raise IOError if message.nil? # the connection was closed
+              trace "got message: #{message.inspect}" if message
               # if it exists and its for me.
               # SSH gives us back echoes, so we need to ignore our own messages
               if message and !message.class.to_s.index("Worker").nil?
                 message.handle(self, worker)
               end
             rescue IOError
-              trace "lost Worker [#{worker.inspect}]"
+              trace "lost Worker [#{worker.inspect}] #{$!.message}\n#{$!.backtrace}"
               Thread.exit
             end
           end
@@ -225,14 +233,15 @@ module Hydra #:nodoc:
 
       @listeners.each{|l| l.join}
       @event_listeners.each{|l| l.testing_end}
+      trace "Finished processing messages (thread list: #{Thread.list.inspect})"
     end
 
     def sort_files_from_report
-      if File.exists? heuristic_file
+      if File.exists? heuristic_file and File.read(heuristic_file).present?
         report = YAML.load_file(heuristic_file)
         return unless report
         sorted_files = report.sort{ |a,b|
-          b[1]['duration'] <=> a[1]['duration']
+          (b[1]['duration'] || 0) <=> (a[1]['duration'] || 0)
         }.collect{|tuple| tuple[0]}
 
         sorted_files.each do |f|
@@ -243,6 +252,16 @@ module Hydra #:nodoc:
 
     def heuristic_file
       @heuristic_file ||= File.join(Dir.consistent_tmpdir, 'hydra_heuristics.yml')
+    end
+
+    def trap_signals
+      @signals.each do |signal|
+        Signal.trap signal do
+          puts "Caught signal #{signal}, shutting down.\n#{caller.join("\n")}"
+          shutdown_all_workers
+          exit 1
+        end
+      end
     end
   end
 end

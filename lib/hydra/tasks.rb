@@ -43,6 +43,8 @@ module Hydra #:nodoc:
 
     attr_accessor :environment
 
+    attr_accessor :test_opts, :test_failure_guard_regexp
+
     # Set to false if you don't want to show the total running time
     attr_accessor :show_time
 
@@ -90,14 +92,12 @@ module Hydra #:nodoc:
       @serial = false
       @listeners = [Hydra::Listener::ProgressBar.new]
       @show_time = true
-      @options = ''
+      @environment = ENV['RAILS_ENV']
+
+      @test_opts = ""
+      @test_failure_guard_regexp = ""
 
       yield self if block_given?
-
-      # Ensure we override rspec's at_exit
-      if defined?(RSpec)
-        RSpec::Core::Runner.disable_autorun!
-      end
 
       unless @serial
         @config = find_config_file
@@ -109,8 +109,9 @@ module Hydra #:nodoc:
         :files => @files,
         :listeners => @listeners,
         :environment => @environment,
-        :runner_log_file => @runner_log_file,
-        :options => @options
+        :test_opts => @test_opts,
+        :test_failure_guard_regexp => @test_failure_guard_regexp,
+        :runner_log_file => @runner_log_file
       }
       if @config
         @opts.merge!(:config => @config)
@@ -124,7 +125,7 @@ module Hydra #:nodoc:
     private
     # Create the rake task defined by this HydraTestTask
     def define
-      desc "Hydra Tests" + (@name == :hydra ? "" : " for #{@name}")
+      desc "Hydra Tests" + (@name == :hydra ? "" : " for #{@name.inspect}")
       task @name do
         if Object.const_defined?('Rails') && Rails.env == 'development'
           $stderr.puts %{WARNING: Rails Environment is "development". Make sure to set it properly (ex: "RAILS_ENV=test rake hydra")}
@@ -132,14 +133,14 @@ module Hydra #:nodoc:
 
         start = Time.now if @show_time
 
-        puts '********************'
-        puts @options.inspect
         master = Hydra::Master.new(@opts)
 
         $stdout.puts "\nFinished in #{'%.6f' % (Time.now - start)} seconds." if @show_time
 
         unless master.failed_files.empty?
-          raise "Hydra: Not all tests passes"
+          num_passed = master.file_count - master.failed_files.size
+          percent = master.file_count == 0 ? 0 : ((num_passed.to_f / master.file_count) * 100).to_i
+          raise "Hydra: Not all tests passed, #{num_passed}/#{master.file_count} passed (#{percent}%)"
         end
       end
     end
@@ -283,7 +284,7 @@ module Hydra #:nodoc:
     def define
       desc "Run #{@name} remotely on all workers"
       task "hydra:remote:#{@name}" do
-        config = YAML.load_file(@config)
+        config = Hydra.load_config(@config)
         environment = config.fetch('environment') { 'test' }
         workers = config.fetch('workers') { [] }
         workers = workers.select{|w| w['type'] == 'ssh'}
