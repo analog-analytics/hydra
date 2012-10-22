@@ -53,7 +53,7 @@ module Hydra #:nodoc:
 
       trace 'Booted. Sending Request for file'
       
-      ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{opts.fetch(@runner_num)}"
+      ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{@runner_num}"
       runner_begin
 
       trace 'Booted. Sending Request for file'
@@ -157,7 +157,7 @@ module Hydra #:nodoc:
           else
             @io.write Ping.new
           end
-        rescue IOError => ex
+        rescue IOError
           trace "Runner lost Worker"
           stop
         end
