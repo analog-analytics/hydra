@@ -53,7 +53,7 @@ module Hydra #:nodoc:
 
       trace 'Booted. Sending Request for file'
       
-      ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{opts.fetch(:index)}"
+      ENV["TEST_DB_ID"] = "#{ENV["USER"]}#{opts.fetch(@runner_num)}"
       runner_begin
 
       trace 'Booted. Sending Request for file'
