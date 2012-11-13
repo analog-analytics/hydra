@@ -1,12 +1,12 @@
 require 'thread'
 require 'timeout'
-require 'syslog_logger'
+require 'syslog-logger'
 module Hydra #:nodoc:
   # Trace output when in verbose mode.
   module Trace
     REMOTE_IDENTIFIER = 'REMOTE'
     
-    TRACE_LOGGER = SyslogLogger.new("hydra")
+    TRACE_LOGGER = Logger::Syslog.new("hydra")
 
     module ClassMethods
       # Make a class traceable. Takes one parameter,

@@ -5,7 +5,7 @@
 
 Gem::Specification.new do |s|
   s.name = %q{hydra}
-  s.version = "0.24.5.3"
+  s.version = "0.24.6.0"
 
   s.required_rubygems_version = Gem::Requirement.new(">= 0") if s.respond_to? :required_rubygems_version=
   s.authors = ["Nick Gauthier"]
@@ -106,7 +106,7 @@ Gem::Specification.new do |s|
      "test/worker_test.rb"
   ]
 
-  s.add_dependency(%q<SyslogLogger>, ["= 1.4.0"])
+  s.add_dependency(%q<syslog-logger>, ["= 1.6.8"])
 
   
 end
